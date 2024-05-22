@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Title</title>
+</head>
+<body>
+<input type="file" accept="image/jpeg" id="img-input" />
+<button id="button">do thing</button>
+
+<script>
+    const makeMessage = (obj) => JSON.stringify({
+        "is_error": false,
+        "body": obj
+    })
+    async function main(e) {
+        e.preventDefault();
+
+        const ws = new WebSocket("ws://localhost:8765")
+
+        ws.addEventListener("open", () => {
+            ws.send(makeMessage({"kind": "START_SESSION"}))
+
+        })
+
+        const STATE = {}
+        const processMessage = async (event) => {
+            const img = document.querySelector("#img-input")
+            const {body} = JSON.parse(event.data);
+            console.log(`
+Websocket Message ${body.kind}: ${JSON.stringify(body, (k,v) => k=='data' ? JSON.parse(v) : v, 4)}
+            `)
+
+            switch (body.kind) {
+                case "SESSION_CONNECTED":
+                    STATE['sessionKey'] = body['session_key']
+                    ws.send(makeMessage({"kind": "INFER_FRAME"}))
+                    return;
+                case "SEND_BINARY":
+                    if (img.files.length === 0) break;
+
+                    const [img_data, ...rest] = Array.from(img.files);
+
+                    await ws.send(img_data);
+                    return;
+                case "INFER_RESULT":
+                    const results = body.data;
+
+                    const div = document.createElement('div');
+                    div.innerText = results;
+                    document.body.appendChild(div)
+
+                    const parsed = JSON.parse(results, null, 4);
+
+                    console.dir(parsed);
+                    return;
+            }
+        }
+        ws.addEventListener('message', processMessage);
+
+    }
+
+    document.querySelector('#button').addEventListener('click', main);
+</script>
+</body>
+</html>
