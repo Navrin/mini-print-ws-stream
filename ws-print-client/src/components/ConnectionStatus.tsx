@@ -1,5 +1,5 @@
 import styled from "styled-components";
-import React, { useContext } from "react";
+import React, { useContext, useEffect } from "react";
 import { InferContext } from "../main";
 import { darken, desaturate, lighten } from "polished";
 import { compose } from "ramda";
@@ -30,22 +30,27 @@ interface IConnectionStatusProps {}
 
 const ConnectionStatus = observer((props: IConnectionStatusProps) => {
     const inferStore = useContext(InferContext);
+    const reconnect = () => {
+        inferStore.resetConnection();
+    };
 
     const status = inferStore.connectionState;
     if (status == WebSocket.CONNECTING) {
         return (
-            <ConnectionStatusBase state={status}>
+            <ConnectionStatusBase onClick={reconnect} state={status}>
                 Not Connected...
             </ConnectionStatusBase>
         );
     }
     if (status == WebSocket.OPEN) {
         return (
-            <ConnectionStatusBase state={status}>Ready!</ConnectionStatusBase>
+            <ConnectionStatusBase onClick={reconnect} state={status}>
+                {inferStore.reconnected ? "Reconnected!" : "Ready!"}
+            </ConnectionStatusBase>
         );
     }
     return (
-        <ConnectionStatusBase state={status}>
+        <ConnectionStatusBase onClick={reconnect} state={status}>
             Closed or Unknown
         </ConnectionStatusBase>
     );

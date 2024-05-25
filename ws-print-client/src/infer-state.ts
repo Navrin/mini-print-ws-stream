@@ -55,12 +55,18 @@ interface WSSessionStart {
 interface WSStopStream {
     kind: "STOP_STREAM";
 }
+interface WSSessionConnect {
+    kind: "CONNECT_SESSION";
+    session_key: string;
+}
 
 type WSMessageBody =
     | WSStopStream
     | WSInferStream
     | WSInferFrame
-    | WSSessionStart;
+    | WSSessionStart
+    | WSSessionConnect;
+
 interface WSMessage {
     body: WSMessageBody;
 }
@@ -83,12 +89,37 @@ function wrapMessage(msg: WSMessageBody) {
 }
 
 class InferState {
-    sessionToken: string | null;
+    static SESSION_TOKEN_STORGE = "SESSION_TOKEN";
+
+    _sessionToken: string | null;
+    reconnected: boolean = false;
+
+    @computed
+    get sessionToken() {
+        if (this._sessionToken == null) {
+            console.log("session token was nulled");
+            const storedToken = localStorage.getItem(
+                InferState.SESSION_TOKEN_STORGE,
+            );
+            console.log(storedToken);
+            if (storedToken != "") {
+                this._sessionToken = storedToken;
+            }
+        }
+        return this._sessionToken;
+    }
+
+    set sessionToken(token: string | null) {
+        localStorage.setItem(InferState.SESSION_TOKEN_STORGE, token || "");
+        this._sessionToken = token;
+        console.log(`saving ${token} into localstorage`);
+    }
     connection!: WebSocket;
 
     inferData: InferResponseResult[];
     lastError = "";
     watchingStream: boolean = false;
+
     get error() {
         return this.lastError;
     }
@@ -112,7 +143,7 @@ class InferState {
     static WS_TARGET = "ws://localhost:8765";
     static FRAME_URL = "http://127.0.0.1:5000";
     constructor() {
-        this.sessionToken = null;
+        // this.sessionToken = null;
         this.inferData = [];
         makeAutoObservable(
             this,
@@ -127,12 +158,16 @@ class InferState {
     private connect() {
         this.connection = new WebSocket(InferState.WS_TARGET);
         this.connectionState = this.connection.readyState;
-
+        window.onbeforeunload = () => {
+            this.connection.onclose = function () {}; // disable onclose handler first
+            this.connection.close();
+        };
         this.connection.addEventListener("open", this.onWebConnect);
         this.connection.addEventListener("error", this.handleSocketError);
         this.connection.addEventListener("message", this.onMessage);
         this.connection.addEventListener("close", () => {
             this.connectionState = this.connection.readyState;
+            console.log("session terminated");
 
             // this.connection.removeEventListener("open", this.onWebConnect);
             // this.connection.removeEventListener("error", this.handleSocketError);
@@ -148,6 +183,8 @@ class InferState {
     }
 
     resetConnection = () => {
+        this.connection.close();
+
         this.connect();
     };
 
@@ -161,6 +198,7 @@ class InferState {
 
     @action
     onMessage({ data }: MessageEvent) {
+        this.connectionState = this.connection.readyState;
         const { body }: WSResponse = JSON.parse(data);
 
         console.log(`Websocket Message ${body.kind}: 
@@ -168,10 +206,22 @@ ${JSON.stringify(body, (k, v) => (k == "data" ? JSON.parse(v) : v), 4)}`);
 
         switch (body.kind) {
             case "SESSION_CONNECTED":
-                this.sessionToken = body.session_key;
+                if (this.sessionToken === body.session_key) {
+                    this.reconnected = true;
+                    console.log("session reconnected");
+                } else {
+                    this.sessionToken = body.session_key;
+                }
                 break;
             case "ERROR":
-                this.error = body.error;
+                if (body.error.includes("session associated")) {
+                    console.log("session invalid");
+                    this.sessionToken = null;
+                    localStorage.removeItem(InferState.SESSION_TOKEN_STORGE);
+                    this.onWebConnect();
+                } else {
+                    this.error = body.error;
+                }
                 break;
             case "INFER_RESULT": {
                 const result = JSON.parse(body.data);
@@ -191,11 +241,24 @@ ${JSON.stringify(body, (k, v) => (k == "data" ? JSON.parse(v) : v), 4)}`);
                 this.currentFramePath = body.frame_url;
                 this.watchingStream = true;
         }
+
+        this.connectionState = this.connection.readyState;
     }
 
     onWebConnect = () => {
         this.connectionState = this.connection.readyState;
-        this.connection.send(wrapMessage({ kind: "START_SESSION" }));
+        console.log(`session token is ${this.sessionToken}`);
+        if (this.sessionToken != null) {
+            this.connection.send(
+                wrapMessage({
+                    kind: "CONNECT_SESSION",
+                    session_key: this.sessionToken,
+                }),
+            );
+        } else {
+            this.connection.send(wrapMessage({ kind: "START_SESSION" }));
+        }
+        this.connectionState = this.connection.readyState;
     };
 
     requestFrameInfer() {
@@ -247,6 +310,7 @@ ${JSON.stringify(body, (k, v) => (k == "data" ? JSON.parse(v) : v), 4)}`);
     }
 
     set connectionState(val: number) {
+        console.log(`connstate ${val}`);
         this._connState = val;
     }
 }
