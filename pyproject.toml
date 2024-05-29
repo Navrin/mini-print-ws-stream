@@ -20,6 +20,9 @@ trio = "^0.25.1"
 trio-websocket = "^0.11.1"
 trio-asyncio = "^0.15.0"
 nest-asyncio = "^1.6.0"
+webpush = "^1.0.2"
+onesignal-python-api = "^2.0.2"
+python-dotenv = "^1.0.1"
 
 
 [build-system]

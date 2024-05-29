@@ -1,3 +1,7 @@
+import uuid
+from onesignal.model.notification import Notification
+from onesignal.model.player_notification_target_include_aliases import PlayerNotificationTargetIncludeAliases
+from onesignal.model.string_map import StringMap
 from statemachine import StateMachine, State
 from ultralytics.engine.results import Results
 from ultralytics import YOLO
@@ -25,9 +29,20 @@ import trio_asyncio
 from sympy import O
 import trio
 import trio_websocket as ws
+import onesignal
+from onesignal.api import default_api
 import cv2
 import nest_asyncio
+import dotenv
 nest_asyncio.apply()
+
+dotenv.load_dotenv("../.env")
+
+configuration = onesignal.Configuration(
+    app_key=os.getenv("ONESIGNAL_KEY"),
+    # api_key=os.getenv("ONESIGNAL_KEY")
+)
+
 # import websockets
 # from websockets.server import serve
 
@@ -41,6 +56,14 @@ model = YOLO("../yolo_weights/best.pt")
 class SocketMessageInferStream:
     stream_url: str
     kind: Literal['INFER_STREAM'] = 'INFER_STREAM'
+
+
+@dataclass
+class WSMessageRequestNotification:
+    conditions: list[tuple[str, float]]
+    email: str | None
+    extern_id: str
+    kind: Literal['REQUEST_NOTIFICATION'] = 'REQUEST_NOTIFICATION'
 
 
 @dataclass
@@ -67,7 +90,7 @@ class WSMessageStopStream:
 
 class WSMessage(BaseModel):
     model_config = ConfigDict(strict=True)
-    body: SocketMessageInferFrame | SocketMessageInferStream | WSMessageStartSession | WSMessageStopStream | WSMessageConnectSession = Field(
+    body: SocketMessageInferFrame | SocketMessageInferStream | WSMessageStartSession | WSMessageStopStream | WSMessageConnectSession | WSMessageRequestNotification = Field(
         discriminator='kind')
 
 
@@ -88,6 +111,11 @@ class WSResponseSessionConnected:
 class WSResponseError:
     error: str
     kind: Literal['ERROR'] = 'ERROR'
+
+
+@dataclass
+class WSResponseNotification:
+    kind: Literal['NOTIFICATION_CREATED'] = 'NOTIFICATION_CREATED'
 
 
 @dataclass
@@ -113,7 +141,7 @@ class WSResponse(BaseModel):
         return WSResponse(is_error=True, body=WSResponseError(error=str(error)))
 
 
-logging.getLogger("utils.general").setLevel(logging.WARNING)  # yolov5 logger
+# logging.getLogger("utils.general").setLevel(logging.WARNING)  # yolov5 logger
 
 
 class SessionState(StateMachine):
@@ -209,6 +237,71 @@ class SessionState(StateMachine):
         except (StreamNotValidError, FileNotFoundError):
             pass
 
+    @dataclass
+    class NotificationObject:
+        conditions: list[tuple[str, float]]
+        email: str
+        extern_id: str
+        last_send: int = -1
+
+    notifications: list[NotificationObject] = []
+
+    def add_notification(self, extern_id, conditions, email=None):
+        self.notifications.append(self.NotificationObject(
+            conditions=conditions,
+            email=email,
+            extern_id=extern_id,
+        ))
+
+    async def check_notifications(self, result: Results):
+        box_cls = {}
+
+        for box in result.summary():
+            box_cls[box['name']] = box['confidence']
+
+        for notification in self.notifications:
+            if abs(notification.last_send - time.time()) <= 20:
+                continue
+            for [cls, val] in notification.conditions:
+                if cls not in box_cls:
+                    continue
+                if box_cls[cls] < val:
+                    continue
+
+                notification.last_send = time.time()
+                with onesignal.ApiClient(configuration) as api_client:
+                    # Create an instance of the API class
+                    api_instance = default_api.DefaultApi(api_client)
+                    notification_msg = Notification(
+                        app_id=os.getenv("ONESIGNAL_APP"),
+                        # include_external_user_ids=[notification.extern_id],
+                        # target_channel="push"
+                    )
+                    # notification_msg.set_attribute(
+                    # 'external_id', str(uuid.uuid4()))
+                    contentsStringMap = StringMap()
+
+                    contentsStringMap.set_attribute(
+                        'en', f"[Print Alert] {cls} at {box_cls[cls]}!")
+
+                    notification_msg.set_attribute(
+                        'contents', contentsStringMap)
+                    notification_msg.set_attribute('is_any_web', True)
+                    # notification_msg.set_attribute('is_any_web', True)
+                    notification_msg.set_attribute(
+                        'include_subscription_ids', [notification.extern_id])
+
+                    try:
+                        print("sending out notification!")
+                        api_response = api_instance.create_notification(
+                            notification_msg)
+                        res = api_response
+                        print(f'api_resonse was {res=}')
+
+                    except onesignal.ApiException as e:
+                        print(f"encounted onesignal error {e=} {
+                            e.reason} {e.status} {e.body}")
+
 
 SESSIONS: dict[str, SessionState] = {}
 
@@ -261,8 +354,7 @@ async def process(websocket: ws.WebSocketConnection, reconnect_session_key=None)
             if reconnect_session_key is not None:
                 # session_machine.task_nursery.start_soon(
                 # parse_message, websocket, session_machine)
-                n.start_soon(
-                    parse_message, websocket, session_machine)
+                await parse_message(websocket, session_machine)
             else:
                 # async with trio.open_nursery() as n:
 
@@ -279,6 +371,8 @@ async def process(websocket: ws.WebSocketConnection, reconnect_session_key=None)
                              websocket, session_machine)
 
                 while session_machine.current_state != session_machine.session_terminated:
+                    # logging.debug('[Process Daemon] Loop complete')
+
                     await trio.sleep(0)
 
     except* (ValidationError, JSONDecodeError, StreamNotValidError, cv2.error, StateInvariantError) as e:
@@ -311,20 +405,21 @@ async def message_worker(st: SessionState):
         if st.current_state == st.session_terminated:
             return
 
-        print('got new message to send!')
+        logging.debug('got new message to send!')
         for sock in st.connections.copy():
-            with trio.move_on_after(2):
-                try:
-                    await sock.send_message(message)
-                except ws.ConnectionClosed:
-                    print(f'terminating connection {sock.CONNECTION_ID}')
-                    await st.remove_connection(sock)
-        print('Done sending!')
+            # with trio.move_on_after(2):
+            try:
+                await sock.send_message(message)
+            except ws.ConnectionClosed:
+                print(f'terminating connection {sock.CONNECTION_ID}')
+                await st.remove_connection(sock)
+        logging.debug('Done sending!')
 
 
 async def parse_message(websocket: ws.WebSocketConnection, st: SessionState):
     # async for message in websocket:
     while not websocket.closed:
+        logging.debug("[Parse Message Daemon] start loop")
         if st.current_state == st.session_terminated:
             return
 
@@ -397,12 +492,16 @@ async def parse_message(websocket: ws.WebSocketConnection, st: SessionState):
                 continue
             st.end_stream()
 
+        if parsed.body.kind == 'REQUEST_NOTIFICATION':
+            st.add_notification(parsed.body.extern_id,
+                                parsed.body.conditions, email=parsed.body.email)
+
 
 async def spawn_watcher(st: SessionState):
     while st.current_state != st.inferring_stream:
         if st.current_state == st.session_terminated:
             return
-
+        logging.debug("[Stream Watcher] Watcher is still asleep...")
         await trio.sleep(0.25)
 
     target = st.stream_target
@@ -456,11 +555,13 @@ async def spawn_watcher(st: SessionState):
                                      result.orig_shape[0]]
                     )).model_dump_json()
                 )
+                await st.check_notifications(result)
+            logging.debug("[Stream Watcher] Watcher is awake! ...")
             await trio.sleep(0.015)
     finally:
         if cap.isOpened():
             cap.release()
-        # pass
+            # pass
 
 
 async def handle(nursery: trio.Nursery, websocket: ws.WebSocketRequest):
@@ -482,7 +583,7 @@ async def handle(nursery: trio.Nursery, websocket: ws.WebSocketRequest):
     except* (ValidationError, SessionNotFoundError) as e:
         await conn.send_message(WSResponse(is_error=True, body=WSResponseError(error=str(e.exceptions[0]))).model_dump_json())
         if type(e) is SessionNotFoundError:
-            n.start_soon(process, conn)
+            await process(conn)
     except* ws.ConnectionClosed:
         pass
 
@@ -508,7 +609,7 @@ async def session_monitor():
                 state.cleanup()
                 state.terminate()
                 del SESSIONS[key]
-
+        logging.debug('[Session Daemon] Check complete')
         await trio.sleep(5)
 
 
@@ -518,14 +619,17 @@ async def main():
         serve = functools.partial(
             ws.serve_websocket, disconnect_timeout=0.5, ssl_context=None)
         handle_partial = functools.partial(handle, n)
-        # with trio.CancelScope() as cs:
-        #     cs.shield = True
-        n.start_soon(serve,
-                     handle_partial, "localhost", 8765)
+        with trio.CancelScope() as cs:
+            # cs.shield = True
+            n.start_soon(serve,
+                         handle_partial, "localhost", 8765)
         n.start_soon(session_monitor)
 
-print(WSMessage.model_json_schema(mode='serialization'))
-main_model_schema = WSMessage.model_json_schema(mode='serialization')  # (1)!
-print(json.dumps(main_model_schema, indent=2))  # (2)!
+# print(WSMessage.model_json_schema(mode='serialization'))
+# main_model_schema = WSMessage.model_json_schema(mode='serialization')  # (1)!
+# print(json.dumps(main_model_schema, indent=2))  # (2)!
 
+logger = logging.getLogger(__name__)
+
+logging.basicConfig(filename='myapp.log', level=logging.INFO)
 trio.run(main)

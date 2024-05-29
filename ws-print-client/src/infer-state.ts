@@ -7,6 +7,7 @@ import {
     observable,
     runInAction,
 } from "mobx";
+import OneSignal from "react-onesignal";
 import { StringLiteral } from "typescript";
 
 interface WSResponseSendBinary {
@@ -59,13 +60,19 @@ interface WSSessionConnect {
     kind: "CONNECT_SESSION";
     session_key: string;
 }
-
+interface WSNotificationSubscribe {
+    kind: "REQUEST_NOTIFICATION";
+    email: string | null;
+    conditions: [string, number][];
+    extern_id: string;
+}
 type WSMessageBody =
     | WSStopStream
     | WSInferStream
     | WSInferFrame
     | WSSessionStart
-    | WSSessionConnect;
+    | WSSessionConnect
+    | WSNotificationSubscribe;
 
 interface WSMessage {
     body: WSMessageBody;
@@ -119,6 +126,7 @@ class InferState {
     inferData: InferResponseResult[];
     lastError = "";
     watchingStream: boolean = false;
+    notificationsEnabled: boolean = false;
 
     get error() {
         return this.lastError;
@@ -312,6 +320,27 @@ ${JSON.stringify(body, (k, v) => (k == "data" ? JSON.parse(v) : v), 4)}`);
     set connectionState(val: number) {
         console.log(`connstate ${val}`);
         this._connState = val;
+    }
+
+    async sendNotificationRequest(formState) {
+        const extern_id = OneSignal.User.PushSubscription.id;
+        console.log(extern_id);
+        const alerts: [string, number][] = Object.entries(
+            formState.alerts as {
+                [key: string]: { active: boolean; threshold: null | number };
+            },
+        )
+            .filter(([, val]) => val.active)
+            .map(([cls, val]) => [cls, 1 / (val.threshold || 80)]);
+
+        this.connection.send(
+            wrapMessage({
+                kind: "REQUEST_NOTIFICATION",
+                conditions: alerts,
+                email: formState.email,
+                extern_id: extern_id as string,
+            }),
+        );
     }
 }
 

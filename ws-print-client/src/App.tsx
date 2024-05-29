@@ -8,6 +8,8 @@ import Predictions from "./components/Predictions";
 import FrameUpload from "./components/FrameUpload";
 import ConnectionStatus from "./components/ConnectionStatus";
 import StartStream from "./components/StartStream";
+import NotificationForm from "./components/NotificationForm";
+import OneSignal from "react-onesignal";
 
 const AppRoot = styled.main`
     display: grid;
@@ -30,6 +32,20 @@ const SideColumn = styled.section`
 
 const App = observer(() => {
     const inferStore = useContext(InferContext);
+    const [notifInitialised, setNotifInitialised] = useState(false);
+    if (!notifInitialised) {
+        OneSignal.init({
+            appId: "9c7fc99a-b3c4-48d8-b0d3-7e0743f6c026",
+            // serviceWorkerPath: "/OneSignalSDKWorker.js",
+            autoRegister: true,
+            allowLocalhostAsSecureOrigin: true,
+            safari_web_id:
+                "web.onesignal.auto.02093de6-f6ab-427c-bf3a-c7ddb76bfc75",
+        }).then(() => {
+            setNotifInitialised(true);
+        });
+    }
+
     return (
         <AppRoot>
             <FrameView />
@@ -41,6 +57,7 @@ const App = observer(() => {
                     <Observer>{() => <div>{inferStore.error}</div>}</Observer>
                 </div>
                 <Predictions />
+                <NotificationForm />
             </SideColumn>
         </AppRoot>
     );
